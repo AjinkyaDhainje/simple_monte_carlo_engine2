@@ -88,6 +88,9 @@ with st.sidebar:
     num_steps = st.number_input(
         "Time steps", min_value=1, max_value=2_000, value=252, step=1
     )
+    runs = st.number_input(
+        "Runs", min_value=1, max_value=100, value=1, step=1
+    )
     run_button = st.button("Run simulation", type="primary")
 
 if not run_button:
@@ -108,24 +111,41 @@ try:
         volatility=float(volatility),
         num_paths=int(num_paths),
         num_steps=int(num_steps),
+        runs=int(runs),
         **model_values,
         **payoff_values,
     )
     with st.spinner("Running the simulation..."):
-        result = SimulationManager().run(inputs)
+        multi_run_result = SimulationManager().run_multiple(inputs)
 except (ValueError, MemoryError) as error:
     st.error(f"Simulation could not be completed: {error}")
     st.stop()
 
+result = multi_run_result.final_run
+st.subheader("Option prices by run")
+st.table(
+    [
+        {"Run": run_number, "Final option price": f"{price:.4f}"}
+        for run_number, price in enumerate(multi_run_result.option_prices, start=1)
+    ]
+)
+
 low, high = result.confidence_interval
 columns = st.columns(4)
-columns[0].metric("Option price", f"{result.option_price:.4f}")
-columns[1].metric("95% confidence interval", f"[{low:.4f}, {high:.4f}]")
-columns[2].metric("Standard error", f"{result.standard_error:.4f}")
-columns[3].metric("Simulation time", f"{result.elapsed_seconds:.3f} s")
+columns[0].metric(
+    "Average final option price", f"{multi_run_result.average_option_price:.4f}"
+)
+columns[1].metric(
+    "Final run 95% confidence interval", f"[{low:.4f}, {high:.4f}]"
+)
+columns[2].metric("Final run standard error", f"{result.standard_error:.4f}")
+columns[3].metric(
+    "Total simulation time", f"{multi_run_result.elapsed_seconds:.3f} s"
+)
 
 # Each chart receives only the data it needs. The UI never receives the full
 # path matrix: result.display_paths contains at most 10,000 complete paths.
+st.subheader("Final run charts")
 figures = [
     path_chart(result.display_paths, result.time_grid, inputs.strike),
     terminal_price_chart(result.terminal_prices),

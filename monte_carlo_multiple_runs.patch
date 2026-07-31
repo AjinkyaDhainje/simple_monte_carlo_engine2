@@ -1,0 +1,219 @@
+diff --git a/README.md b/README.md
+index fa04293..49d228b 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,7 @@ small and readable. It includes:
+ - Standard, Sobol quasi-Monte Carlo, and scrambled Sobol sampling
+ - Antithetic variance reduction for generated paths
+ - Up to 1,000,000 simulated paths
++- Repeated runs with every final option price and their average
+ - Option price, standard error, and approximate 95% confidence interval
+ - Path, terminal-price, payoff, and price-convergence charts
+ - A Streamlit UI with model/payoff inputs that appear immediately when needed
+@@ -118,6 +119,10 @@ The 10,000-path limit affects only path visualisation, never pricing.
+ Within each batch, the engine generates half of the normal draws and mirrors
+ them as `Z, -Z` antithetic pairs.
+ 
++When multiple runs are requested, the UI displays each run's final option
++price and their average. Full path and payoff data is retained only for the
++final run, and all four charts are shown below the complete price summary.
++
+ ## Add another model
+ 
+ 1. Add any new input fields to `SimulationInputs` with sensible defaults.
+diff --git a/app.py b/app.py
+index fbbc506..681c531 100644
+--- a/app.py
++++ b/app.py
+@@ -88,6 +88,9 @@ with st.sidebar:
+     num_steps = st.number_input(
+         "Time steps", min_value=1, max_value=2_000, value=252, step=1
+     )
++    runs = st.number_input(
++        "Runs", min_value=1, max_value=100, value=1, step=1
++    )
+     run_button = st.button("Run simulation", type="primary")
+ 
+ if not run_button:
+@@ -108,24 +111,41 @@ try:
+         volatility=float(volatility),
+         num_paths=int(num_paths),
+         num_steps=int(num_steps),
++        runs=int(runs),
+         **model_values,
+         **payoff_values,
+     )
+     with st.spinner("Running the simulation..."):
+-        result = SimulationManager().run(inputs)
++        multi_run_result = SimulationManager().run_multiple(inputs)
+ except (ValueError, MemoryError) as error:
+     st.error(f"Simulation could not be completed: {error}")
+     st.stop()
+ 
++result = multi_run_result.final_run
++st.subheader("Option prices by run")
++st.table(
++    [
++        {"Run": run_number, "Final option price": f"{price:.4f}"}
++        for run_number, price in enumerate(multi_run_result.option_prices, start=1)
++    ]
++)
++
+ low, high = result.confidence_interval
+ columns = st.columns(4)
+-columns[0].metric("Option price", f"{result.option_price:.4f}")
+-columns[1].metric("95% confidence interval", f"[{low:.4f}, {high:.4f}]")
+-columns[2].metric("Standard error", f"{result.standard_error:.4f}")
+-columns[3].metric("Simulation time", f"{result.elapsed_seconds:.3f} s")
++columns[0].metric(
++    "Average final option price", f"{multi_run_result.average_option_price:.4f}"
++)
++columns[1].metric(
++    "Final run 95% confidence interval", f"[{low:.4f}, {high:.4f}]"
++)
++columns[2].metric("Final run standard error", f"{result.standard_error:.4f}")
++columns[3].metric(
++    "Total simulation time", f"{multi_run_result.elapsed_seconds:.3f} s"
++)
+ 
+ # Each chart receives only the data it needs. The UI never receives the full
+ # path matrix: result.display_paths contains at most 10,000 complete paths.
++st.subheader("Final run charts")
+ figures = [
+     path_chart(result.display_paths, result.time_grid, inputs.strike),
+     terminal_price_chart(result.terminal_prices),
+diff --git a/monte_carlo/__init__.py b/monte_carlo/__init__.py
+index 0a22e9c..63f8076 100644
+--- a/monte_carlo/__init__.py
++++ b/monte_carlo/__init__.py
+@@ -1,7 +1,11 @@
+ """Simple, configurable Monte Carlo option-pricing engine."""
+ 
+ from .inputs import SimulationInputs
+-from .manager import SimulationManager, SimulationResult
++from .manager import (
++    MultiRunSimulationResult,
++    SimulationManager,
++    SimulationResult,
++)
+ from .engine import MODELS, MonteCarloEngine
+ from .payoffs import PAYOFFS
+ from .sampling import SAMPLERS
+@@ -11,6 +15,7 @@ __all__ = [
+     "DISCRETIZATIONS",
+     "MODELS",
+     "MonteCarloEngine",
++    "MultiRunSimulationResult",
+     "PAYOFFS",
+     "SAMPLERS",
+     "SimulationInputs",
+diff --git a/monte_carlo/inputs.py b/monte_carlo/inputs.py
+index 6098f4c..dc3a8ae 100644
+--- a/monte_carlo/inputs.py
++++ b/monte_carlo/inputs.py
+@@ -29,6 +29,7 @@ class SimulationInputs:
+     volatility: float = 0.20
+     num_paths: int = 10_000
+     num_steps: int = 252
++    runs: int = 1
+ 
+     # Merton jump-model inputs. Other models ignore these values.
+     jump_intensity: float = 0.75
+@@ -80,5 +81,9 @@ class SimulationInputs:
+             raise ValueError("Number of time steps must be at least one.")
+         if not isinstance(self.num_steps, int):
+             raise ValueError("Number of time steps must be a whole number.")
++        if not isinstance(self.runs, int):
++            raise ValueError("Number of runs must be a whole number.")
++        if self.runs < 1:
++            raise ValueError("Number of runs must be at least one.")
+         if self.option_type not in ("Call", "Put"):
+             raise ValueError("Option type must be Call or Put.")
+diff --git a/monte_carlo/manager.py b/monte_carlo/manager.py
+index 74d917e..c4e3434 100644
+--- a/monte_carlo/manager.py
++++ b/monte_carlo/manager.py
+@@ -23,12 +23,51 @@ class SimulationResult:
+     elapsed_seconds: float
+ 
+ 
++@dataclass
++class MultiRunSimulationResult:
++    """Prices from every run and full chart data from only the final run."""
++
++    option_prices: list[float]
++    average_option_price: float
++    final_run: SimulationResult
++    elapsed_seconds: float
++
++
+ class SimulationManager:
+     """Validate, simulate, calculate payoffs, and summarize the result."""
+ 
+     def __init__(self, engine_class=MonteCarloEngine):
+         self.engine_class = engine_class
+ 
++    def run_multiple(self, inputs):
++        """Run the same simulation repeatedly and retain only the last paths.
++
++        Every option price is kept for the UI. The large path, terminal-price,
++        and payoff arrays from earlier runs are released as the loop advances,
++        so increasing ``runs`` does not multiply the retained chart data.
++        """
++        inputs.validate_common_inputs()
++        start_time = perf_counter()
++        option_prices = []
++        final_run = None
++
++        for run_index in range(inputs.runs):
++            current_run = self.run(inputs)
++            option_prices.append(current_run.option_price)
++
++            if run_index == inputs.runs - 1:
++                final_run = current_run
++            else:
++                # Earlier runs contribute only their final option price.
++                del current_run
++
++        return MultiRunSimulationResult(
++            option_prices=option_prices,
++            average_option_price=float(np.mean(option_prices)),
++            final_run=final_run,
++            elapsed_seconds=perf_counter() - start_time,
++        )
++
+     def run(self, inputs):
+         inputs.validate_common_inputs()
+         model = self._selected(MODELS, inputs.model, "model")
+diff --git a/tests/test_engine.py b/tests/test_engine.py
+index 86b17aa..0fabe7e 100644
+--- a/tests/test_engine.py
++++ b/tests/test_engine.py
+@@ -108,6 +108,27 @@ class EngineTests(unittest.TestCase):
+         self.assertEqual(len(result.terminal_prices), 1_000_000)
+         self.assertEqual(len(result.discounted_payoffs), 1_000_000)
+ 
++    def test_multiple_runs_return_each_price_and_final_run_data(self):
++        inputs = SimulationInputs(runs=3, num_paths=128, num_steps=4)
++        result = SimulationManager().run_multiple(inputs)
++
++        self.assertEqual(len(result.option_prices), 3)
++        self.assertTrue(all(np.isfinite(price) for price in result.option_prices))
++        self.assertAlmostEqual(
++            result.average_option_price, float(np.mean(result.option_prices))
++        )
++        self.assertAlmostEqual(
++            result.final_run.option_price, result.option_prices[-1]
++        )
++        self.assertEqual(result.final_run.display_paths.shape, (128, 5))
++
++    def test_runs_must_be_a_positive_whole_number(self):
++        for invalid_runs in (0, -1, 1.5):
++            with self.subTest(runs=invalid_runs):
++                inputs = SimulationInputs(runs=invalid_runs)
++                with self.assertRaises(ValueError):
++                    inputs.validate_common_inputs()
++
+     def test_gbm_price_is_close_to_black_scholes(self):
+         inputs = SimulationInputs(
+             discretization="Milstein",

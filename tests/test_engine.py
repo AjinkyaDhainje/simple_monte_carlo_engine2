@@ -108,6 +108,27 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(result.terminal_prices), 1_000_000)
         self.assertEqual(len(result.discounted_payoffs), 1_000_000)
 
+    def test_multiple_runs_return_each_price_and_final_run_data(self):
+        inputs = SimulationInputs(runs=3, num_paths=128, num_steps=4)
+        result = SimulationManager().run_multiple(inputs)
+
+        self.assertEqual(len(result.option_prices), 3)
+        self.assertTrue(all(np.isfinite(price) for price in result.option_prices))
+        self.assertAlmostEqual(
+            result.average_option_price, float(np.mean(result.option_prices))
+        )
+        self.assertAlmostEqual(
+            result.final_run.option_price, result.option_prices[-1]
+        )
+        self.assertEqual(result.final_run.display_paths.shape, (128, 5))
+
+    def test_runs_must_be_a_positive_whole_number(self):
+        for invalid_runs in (0, -1, 1.5):
+            with self.subTest(runs=invalid_runs):
+                inputs = SimulationInputs(runs=invalid_runs)
+                with self.assertRaises(ValueError):
+                    inputs.validate_common_inputs()
+
     def test_gbm_price_is_close_to_black_scholes(self):
         inputs = SimulationInputs(
             discretization="Milstein",

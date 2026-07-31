@@ -23,11 +23,50 @@ class SimulationResult:
     elapsed_seconds: float
 
 
+@dataclass
+class MultiRunSimulationResult:
+    """Prices from every run and full chart data from only the final run."""
+
+    option_prices: list[float]
+    average_option_price: float
+    final_run: SimulationResult
+    elapsed_seconds: float
+
+
 class SimulationManager:
     """Validate, simulate, calculate payoffs, and summarize the result."""
 
     def __init__(self, engine_class=MonteCarloEngine):
         self.engine_class = engine_class
+
+    def run_multiple(self, inputs):
+        """Run the same simulation repeatedly and retain only the last paths.
+
+        Every option price is kept for the UI. The large path, terminal-price,
+        and payoff arrays from earlier runs are released as the loop advances,
+        so increasing ``runs`` does not multiply the retained chart data.
+        """
+        inputs.validate_common_inputs()
+        start_time = perf_counter()
+        option_prices = []
+        final_run = None
+
+        for run_index in range(inputs.runs):
+            current_run = self.run(inputs)
+            option_prices.append(current_run.option_price)
+
+            if run_index == inputs.runs - 1:
+                final_run = current_run
+            else:
+                # Earlier runs contribute only their final option price.
+                del current_run
+
+        return MultiRunSimulationResult(
+            option_prices=option_prices,
+            average_option_price=float(np.mean(option_prices)),
+            final_run=final_run,
+            elapsed_seconds=perf_counter() - start_time,
+        )
 
     def run(self, inputs):
         inputs.validate_common_inputs()

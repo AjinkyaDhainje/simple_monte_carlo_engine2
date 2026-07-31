@@ -29,6 +29,7 @@ class SimulationInputs:
     volatility: float = 0.20
     num_paths: int = 10_000
     num_steps: int = 252
+    runs: int = 1
 
     # Merton jump-model inputs. Other models ignore these values.
     jump_intensity: float = 0.75
@@ -80,5 +81,9 @@ class SimulationInputs:
             raise ValueError("Number of time steps must be at least one.")
         if not isinstance(self.num_steps, int):
             raise ValueError("Number of time steps must be a whole number.")
+        if not isinstance(self.runs, int):
+            raise ValueError("Number of runs must be a whole number.")
+        if self.runs < 1:
+            raise ValueError("Number of runs must be at least one.")
         if self.option_type not in ("Call", "Put"):
             raise ValueError("Option type must be Call or Put.")

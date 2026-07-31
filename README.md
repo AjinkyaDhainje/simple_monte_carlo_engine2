@@ -11,6 +11,7 @@ small and readable. It includes:
 - Standard, Sobol quasi-Monte Carlo, and scrambled Sobol sampling
 - Antithetic variance reduction for generated paths
 - Up to 1,000,000 simulated paths
+- Repeated runs with every final option price and their average
 - Option price, standard error, and approximate 95% confidence interval
 - Path, terminal-price, payoff, and price-convergence charts
 - A Streamlit UI with model/payoff inputs that appear immediately when needed
@@ -117,6 +118,10 @@ batch. With 1,000,000 requested paths:
 The 10,000-path limit affects only path visualisation, never pricing.
 Within each batch, the engine generates half of the normal draws and mirrors
 them as `Z, -Z` antithetic pairs.
+
+When multiple runs are requested, the UI displays each run's final option
+price and their average. Full path and payoff data is retained only for the
+final run, and all four charts are shown below the complete price summary.
 
 ## Add another model
 
